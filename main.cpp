@@ -1,190 +1,317 @@
-#include <iostream>
 #include <curl/curl.h>
-#include <cstring>
-#include <string>
-#include <vector>
-#include "avltree.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-std::string response;
-static size_t write_data(void *ptr, size_t size, size_t nmemb, void *stream)
+#define MAX_TITLE_LENGTH 64
+#define MAX_VIDEO_ITEMS 32
+
+struct ResponseBuffer
 {
-    for(unsigned int i = 0 ; i < size*nmemb ; i++)
+    char buffer[1024*32];
+    unsigned int payload_size;
+};
+
+static size_t write_payload(char *buffer, size_t size, size_t nitems, void *userdata)
+{
+    ResponseBuffer* const r_buff = (ResponseBuffer*)userdata;
+    for(long unsigned int i = 0 ; i < size* nitems ; i++)
     {
-        std::cout<<((char*)ptr)[i];
-        response.push_back(((char*)ptr)[i]);
+        r_buff->buffer[r_buff->payload_size++] = buffer[i];
     }
-    return size*nmemb;
+    return size*nitems;
 }
 
-FILE* outfile;
-unsigned int recvsize = 0;
-static size_t fwrite_data(void *ptr, size_t size, size_t nmemb, void *stream)
+static size_t fwrite_payload(char *buffer, size_t size, size_t nitems, void *userdata)
 {
-    fwrite(ptr, size, nmemb, outfile);
-    recvsize += size*nmemb;
-    std::cout<<"DATA"<<recvsize<<"\n";
-    return size*nmemb;
+    fwrite(buffer, size, nitems, (FILE*)userdata);
+    return size*nitems;
 }
 
-struct KEY
-{
-    char key[64];
-}__attribute__((packed));
-
-int main(int argc, char* argv[])
+unsigned int get_urls(char* clip_url, char** title_ret, char* video_request_urls[], unsigned int size)
 {
     CURL *curl;
     CURLcode res;
+    ResponseBuffer response_buffer = {0};
+    unsigned int video_items = 0;
 
+    curl_global_init(CURL_GLOBAL_ALL);
     curl = curl_easy_init();
     if(curl) {
+        char clip_id[32] = {0};
         char video_info_query[512] = {0};
-        avltree<KEY, char*> parsing_response;
-        std::vector<char*> video_list;
-        std::vector< avltree<KEY, char*> > parsing_video_info;
+        char* curl_title = 0;
+        char* curl_stream_map = 0;
+        char* curl_video_item_list[MAX_VIDEO_ITEMS] = {0};
 
-        sprintf(video_info_query, "https://www.youtube.com/get_video_info?video_id=%s", argv[1]);
-        curl_easy_setopt(curl, CURLOPT_URL, video_info_query);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
-        res = curl_easy_perform(curl);
+        {// 0. Request video information
+            sscanf(clip_url, "https://www.youtube.com/watch?v=%s", clip_id);
+            sprintf(video_info_query, "https://www.youtube.com/get_video_info?video_id=%s", clip_id);
+            curl_easy_setopt(curl, CURLOPT_URL, video_info_query);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&response_buffer);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_payload);
+            res = curl_easy_perform(curl);
+            if(res != CURLE_OK){
+                fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+                curl_easy_cleanup(curl);
+                curl_global_cleanup();
+                return 0;
+            }
+        }
 
-        if(res != CURLE_OK) fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-
-        char* cstr = new char [response.length()+1];
-        std::strcpy (cstr, response.c_str());
-        char * item = std::strtok (cstr,"&");
-        while (item!=0)
-        {
-            unsigned int key_len = 0;
-            for( ; key_len < std::strlen(item) ; key_len++)
+        {// 1. Find title from the response
+            char* title_start = strstr(response_buffer.buffer, "title=");
+            char* title_end = title_start;
+            while((*title_end) != '&' && (*title_end) != 0 && (*title_end) != '\n')
             {
-                if(item[key_len] == '=')
-                {
-                    KEY key = {0};
-                    std::strncpy(key.key, item, key_len);
-                    char* value = new char[std::strlen(item) - key_len];
-                    std::strcpy(value, item+key_len+1);
+                title_end++;
+            }
+            int curl_easy_unescape_out;
+            curl_title = curl_easy_unescape(curl, title_start+strlen("title="), title_end-title_start-strlen("title="), &curl_easy_unescape_out);
+            (*title_ret) = curl_title;
+        }
 
-                    parsing_response.insert(key, value);
+        {// 2. Find url_encoded_fmt_stream_map from the response
+            char* url_encoded_fmt_stream_map_start = strstr(response_buffer.buffer, "url_encoded_fmt_stream_map=");
+            char* url_encoded_fmt_stream_map_end = url_encoded_fmt_stream_map_start;
+            while((*url_encoded_fmt_stream_map_end) != '&' && (*url_encoded_fmt_stream_map_end) != 0)
+            {
+                url_encoded_fmt_stream_map_end++;
+            }
+            int curl_easy_unescape_out;
+            curl_stream_map = curl_easy_unescape(curl,
+                                                 url_encoded_fmt_stream_map_start+strlen("url_encoded_fmt_stream_map="),
+                                                 url_encoded_fmt_stream_map_end-url_encoded_fmt_stream_map_start-strlen("url_encoded_fmt_stream_map="),
+                                                 &curl_easy_unescape_out);
+        }
+
+        {// 3. Find video information from stream_map
+            char* video_item = strtok(curl_stream_map, ",");
+            while(video_item)
+            {
+                int curl_easy_unescape_out;
+                curl_video_item_list[video_items++] = curl_easy_unescape(curl, video_item, strlen(video_item), &curl_easy_unescape_out);
+                video_item = strtok(0, ",");
+                if(video_items >= size)
+                {
                     break;
                 }
             }
-            item = std::strtok(NULL,"&");
         }
-        delete []cstr;
 
-        KEY key = {0};
-        std::strcpy(key.key, "url_encoded_fmt_stream_map");
-        if(parsing_response.find(key) != nullptr)
-        {
-            int out;
-            char* stream_map = curl_easy_unescape(curl, (*parsing_response.find(key)), std::strlen((*parsing_response.find(key))), &out);
-            char* video = std::strtok(stream_map, ",");
-            while(video != 0)
+        {// 4. Generate request url with curl_video_item_list
+            for(unsigned int i = 0 ; i < video_items ; i++)
             {
-                char* video_info = new char[std::strlen(video)+1];
-                memset(video_info, 0x0, std::strlen(video)+1);
-                std::strcpy(video_info, video);
-                video_list.push_back(video_info);
-                video = std::strtok(nullptr, ",");
+                video_request_urls[i] = new char[strlen(curl_video_item_list[i])]();
+                // find url first.
+                char* url_start = strstr(curl_video_item_list[i], "url=");
+                if(url_start == 0)
+                {
+                    continue;
+                }
+                strcpy(video_request_urls[i], url_start+strlen("url="));
+                video_request_urls[i][strlen(video_request_urls[i])] = '&';
+                strncpy(video_request_urls[i]+strlen(video_request_urls[i]), curl_video_item_list[i], url_start - curl_video_item_list[i]);
+                if(video_request_urls[i][strlen(video_request_urls[i])-1] == '&')
+                {
+                    video_request_urls[i][strlen(video_request_urls[i])-1] = 0;
+                }
             }
-            curl_free(stream_map);
         }
-        parsing_response.perform_for_all_data([](char* data){delete [] data;});
 
-        for(unsigned int i = 0 ; i < video_list.size() ; i++)
-        {
-            avltree<KEY, char*> video;
-            std::cout<<"=============================================================\n";
-            int out;
-            char* video_tmp = curl_easy_unescape(curl, video_list[i], std::strlen(video_list[i]), &out);
-            char* item = std::strtok(video_tmp, "&?");
-            while(item != 0)
+        {// 5. Remove duplicate itag field. (I don't know why itag field comes twice. Anyway itag should not appear more then once.)
+            for(unsigned int i = 0 ; i < video_items ; i++)
             {
-                if(std::strncmp(item, "url", std::strlen("url")) == 0)
+                char* second_itag_start = strstr(video_request_urls[i], "itag=");
+                if(second_itag_start == 0)
                 {
-                    KEY key = {0};
-                    char* value = nullptr;
-
-                    std::strncpy(key.key, item, std::strlen("url"));
-                    value = new char[std::strlen(item) - std::strlen("url")];
-                    memset(value, 0x0, std::strlen(item) - std::strlen("url"));
-                    std::strcpy(value, item+std::strlen("url")+1);
-
-                    video.insert(key, value);
+                    continue;
                 }
-                else if(std::strncmp(item, "type", std::strlen("type")) == 0)
+                second_itag_start = strstr(second_itag_start+1, "&itag=");
+                if(second_itag_start == 0)
                 {
-                    std::cout<<item<<"\n";
+                    continue;
                 }
-                else if(std::strncmp(item, "fallback_host", std::strlen("fallback_host")) == 0)
+                char* second_itag_end = strstr(second_itag_start+1, "&");
+                second_itag_end = second_itag_end;
+
+                if(second_itag_end)
                 {
+                    memmove(second_itag_start, second_itag_end, strlen(second_itag_end));
                 }
                 else
                 {
-                    unsigned int key_len = 0;
-                    KEY key = {0};
-                    char* value = nullptr;
-
-                    while(item[++key_len] != '=');
-
-                    std::strncpy(key.key, item, key_len);
-                    value = new char[std::strlen(item) - key_len];
-                    memset(value, 0x0, std::strlen(item) - key_len);
-                    std::strcpy(value, item+key_len+1);
-
-                    video.insert(key, value);
+                    memset(second_itag_start, 0x0, strlen(second_itag_start));
                 }
-                item = std::strtok(nullptr, "&?");
             }
-            curl_free(video_tmp);
-            std::string url;
-            std::string param;
-            std::string query;
-            video.perform_for_all_key_data([&](KEY k, char* data){
-                if(std::strncmp(k.key, "url", 3) == 0)
-                {
-                    for(unsigned int i = 0 ; i < std::strlen(data) ; i++)
-                    {
-                        url.push_back(data[i]);
-                    }
-                }
-                else
-                {
-                    for(unsigned int i = 0 ; i < std::strlen(k.key) ; i++)
-                    {
-                        param.push_back(k.key[i]);
-                    }
-                    param.push_back('=');
-                    for(unsigned int i = 0 ; i < std::strlen(data) ; i++)
-                    {
-                        param.push_back(data[i]);
-                    }
-                    param.push_back('&');
-                }
-            });
-            param.pop_back();
-            char choice;
-            std::cout<<"want to download?\n";
-            std::cin >> choice;
-            if(choice == 'y' || choice == 'Y')
-            {
-                query = url+"?"+param;
-                std::cout<<query<<"\n";
-
-                curl_easy_setopt(curl, CURLOPT_URL, query.c_str());
-                response.clear();
-                outfile = fopen("out.mp4", "wb");
-                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite_data);
-
-                res = curl_easy_perform(curl);
-                fclose(outfile);
-            }
-
-            video.perform_for_all_data([](char* data){delete [] data;});
-            video.clear();
         }
+
+        for(unsigned int i = 0 ; i < video_items ; i++)
+        {
+            curl_free(curl_video_item_list[i]);
+        }
+        curl_free(curl_stream_map);
+        //curl_free(curl_title);
+
         curl_easy_cleanup(curl);
+        curl_global_cleanup();
+    }
+    return video_items;
+}
+
+unsigned char get_clip_format(char* url)
+{
+#define YT_CLIP_TYPE_UNKNOWN 0
+#define YT_CLIP_TYPE_WEBM 1
+#define YT_CLIP_TYPE_MP4 2
+#define YT_CLIP_TYPE_3GPP 3
+#define YT_CLIP_TYPE_FLV 4
+    char *type = strstr(url, "type=");
+    if(type == 0)
+    {
+        return YT_CLIP_TYPE_UNKNOWN;
+    }
+    if(strncmp(type+5, "video/webm", 10) == 0)
+    {
+        return YT_CLIP_TYPE_WEBM;
+    }
+    else if(strncmp(type+5, "video/mp4", 9) == 0)
+    {
+        return YT_CLIP_TYPE_MP4;
+    }
+    else if(strncmp(type+5, "video/3gpp", 10) == 0)
+    {
+        return YT_CLIP_TYPE_3GPP;
+    }
+    else if(strncmp(type+5, "video/x-flv", 11) == 0)
+    {
+        return YT_CLIP_TYPE_FLV;
+    }
+    else
+    {
+        return YT_CLIP_TYPE_UNKNOWN;
+    }
+}
+
+void download(char* url, char* filename_extenstion)
+{
+    FILE* file;
+    CURL *curl;
+    CURLcode res;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+    if(curl == 0)
+    {
+        curl_global_cleanup();
+        return;
+    }
+
+    file = fopen(filename_extenstion, "wb");
+    if(file == 0)
+    {
+        curl_easy_cleanup(curl);
+        curl_global_cleanup();
+        return;
+    }
+    if(file)
+    {
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)file);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite_payload);
+        res = curl_easy_perform(curl);
+        if(res != CURLE_OK){
+            fclose(file);
+            curl_easy_cleanup(curl);
+            curl_global_cleanup();
+            return;
+        }
+        fclose(file);
+    }
+    curl_easy_cleanup(curl);
+    curl_global_cleanup();
+    return;
+}
+
+int main(int argc, char* argv[])
+{
+    if(argc != 3)
+    {
+        printf("Usage: %s url format{webm, mp4, 3gpp, flv}", argv[0]);
+        return -1;
+    }
+    char* video_request_urls[MAX_VIDEO_ITEMS] = {0};
+    char* title = 0;
+    unsigned int ret = get_urls(argv[1], &title, video_request_urls, MAX_VIDEO_ITEMS);
+    printf("Title: %s\n", title);
+    for(unsigned int i = 0 ; i <ret ; i++)
+    {
+        unsigned char type = get_clip_format(video_request_urls[i]);
+        switch(type)
+        {
+        case YT_CLIP_TYPE_UNKNOWN:
+            break;
+        case YT_CLIP_TYPE_WEBM:
+            if(strcmp(argv[2], "webm") == 0)
+            {
+                char file_ext[128] = {0};
+                sprintf(file_ext, "%s.webm", title);
+                download(video_request_urls[i], file_ext);
+                printf("%s Done.\n", file_ext);
+                if(title)
+                {
+                    curl_free(title);
+                }
+                return 0;
+            }
+            break;
+        case YT_CLIP_TYPE_MP4:
+            if(strcmp(argv[2], "mp4") == 0)
+            {
+                char file_ext[128] = {0};
+                sprintf(file_ext, "%s.mp4", title);
+                download(video_request_urls[i], file_ext);
+                printf("%s Done.\n", file_ext);
+                if(title)
+                {
+                    curl_free(title);
+                }
+                return 0;
+            }
+            break;
+        case YT_CLIP_TYPE_3GPP:
+            if(strcmp(argv[2], "3gpp") == 0)
+            {
+                char file_ext[128] = {0};
+                sprintf(file_ext, "%s.3gpp", title);
+                download(video_request_urls[i], file_ext);
+                printf("%s Done.\n", file_ext);
+                if(title)
+                {
+                    curl_free(title);
+                }
+                return 0;
+            }
+            break;
+        case YT_CLIP_TYPE_FLV:
+            if(strcmp(argv[2], "flv") == 0)
+            {
+                char file_ext[128] = {0};
+                sprintf(file_ext, "%s.flv", title);
+                download(video_request_urls[i], file_ext);
+                printf("%s Done.\n", file_ext);
+                if(title)
+                {
+                    curl_free(title);
+                }
+                return 0;
+            }
+            break;
+        }
+    }
+    if(title)
+    {
+        curl_free(title);
     }
     return 0;
 }

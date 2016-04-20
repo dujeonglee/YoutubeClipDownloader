@@ -19,10 +19,10 @@ $(TARGET) : $(OBJECTS)
 clean :
 	rm -rf $(OBJECTS) $(TARGET) *~
 
-debug : CPPFLAGS := -g -c -Wall -Werror -std=c++11
+debug : CPPFLAGS := -g -c -Wall -Werror
 debug : $(TARGET)
-	./ytdl rn-wj4pRpIE
+	./ytdl https://www.youtube.com/watch?v=rn-wj4pRpIE mp4
 
-release : CPPFLAGS := -O0 -c -Wall -Werror -std=c++11
+release : CPPFLAGS := -O0 -c -Wall -Werror
 release : $(TARGET)
-	./ytdl rn-wj4pRpIE
+	./ytdl https://www.youtube.com/watch?v=rn-wj4pRpIE mp4
