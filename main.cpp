@@ -63,11 +63,16 @@ static size_t fwrite_payload(char *buffer, size_t size, size_t nitems, void *use
 {
         dl_size  = dl_size + (size*nitems);
         printf("\r");
-        printf("[%3u%%]", dl_size*100 / total_size);
-        for(unsigned int i = 0 ; i < dl_size*10 / total_size ; i++)
+        printf("[%3u%%]<", dl_size*100 / total_size);
+        for(unsigned int i = 0 ; i < dl_size*50 / total_size ; i++)
         {
             printf("=");
         }
+        for(unsigned int i = 0 ; i < 50 - dl_size*50 / total_size ; i++)
+        {
+            printf("-");
+        }
+        printf(">");
         fflush(stdout);
         return fwrite(buffer, size, nitems, (FILE*)userdata);
 }
