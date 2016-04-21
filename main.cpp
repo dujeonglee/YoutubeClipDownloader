@@ -3,22 +3,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MAX_RESPONSE_BUFFER_SIZE (1024*64)
 #define MAX_TITLE_LENGTH 64
 #define MAX_VIDEO_ITEMS 32
 
+#define MY_DBG			printf("%s: %u\n", __func__, __LINE__)
+
 struct ResponseBuffer
 {
-    char buffer[1024*32];
+    char buffer[MAX_RESPONSE_BUFFER_SIZE];
     unsigned int payload_size;
 };
 
 static size_t write_payload(char *buffer, size_t size, size_t nitems, void *userdata)
 {
     ResponseBuffer* const r_buff = (ResponseBuffer*)userdata;
-    for(long unsigned int i = 0 ; i < size* nitems ; i++)
-    {
-        r_buff->buffer[r_buff->payload_size++] = buffer[i];
-    }
+	printf("Write start from %u\n", r_buff->payload_size);
+	if(r_buff->payload_size + size*nitems < MAX_RESPONSE_BUFFER_SIZE)
+	{
+		memcpy(r_buff->buffer+r_buff->payload_size, buffer, size*nitems);
+		r_buff->payload_size += size * nitems;
+	}
     return size*nitems;
 }
 
@@ -28,27 +33,30 @@ static size_t fwrite_payload(char *buffer, size_t size, size_t nitems, void *use
     return size*nitems;
 }
 
-unsigned int get_urls(char* clip_url, char** title_ret, char* video_request_urls[], unsigned int size)
+unsigned int get_urls(char* clip_url, char* title, unsigned int title_size, char* video_request_urls[], unsigned int size)
 {
     CURL *curl;
     CURLcode res;
-    ResponseBuffer response_buffer = {0};
     unsigned int video_items = 0;
 
     curl_global_init(CURL_GLOBAL_ALL);
     curl = curl_easy_init();
     if(curl) {
+	    ResponseBuffer* response_buffer;
         char clip_id[32] = {0};
         char video_info_query[512] = {0};
         char* curl_title = 0;
         char* curl_stream_map = 0;
         char* curl_video_item_list[MAX_VIDEO_ITEMS] = {0};
 
+		response_buffer = new ResponseBuffer();
         {// 0. Request video information
             sscanf(clip_url, "https://www.youtube.com/watch?v=%s", clip_id);
             sprintf(video_info_query, "https://www.youtube.com/get_video_info?video_id=%s", clip_id);
             curl_easy_setopt(curl, CURLOPT_URL, video_info_query);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&response_buffer);
+			memset(response_buffer->buffer, 0x0, MAX_RESPONSE_BUFFER_SIZE);
+			response_buffer->payload_size = 0;
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response_buffer);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_payload);
             res = curl_easy_perform(curl);
             if(res != CURLE_OK){
@@ -60,7 +68,8 @@ unsigned int get_urls(char* clip_url, char** title_ret, char* video_request_urls
         }
 
         {// 1. Find title from the response
-            char* title_start = strstr(response_buffer.buffer, "title=");
+			unsigned int actual_title_length;
+            char* title_start = strstr(response_buffer->buffer, "title=");
             char* title_end = title_start;
             while((*title_end) != '&' && (*title_end) != 0 && (*title_end) != '\n')
             {
@@ -68,11 +77,14 @@ unsigned int get_urls(char* clip_url, char** title_ret, char* video_request_urls
             }
             int curl_easy_unescape_out;
             curl_title = curl_easy_unescape(curl, title_start+strlen("title="), title_end-title_start-strlen("title="), &curl_easy_unescape_out);
-            (*title_ret) = curl_title;
+			actual_title_length = strlen(curl_title);
+			memset(title, 0x0, title_size);
+            strncpy(title, curl_title, (actual_title_length < size-1?actual_title_length:size-1));
+			curl_free(curl_title);
         }
 
         {// 2. Find url_encoded_fmt_stream_map from the response
-            char* url_encoded_fmt_stream_map_start = strstr(response_buffer.buffer, "url_encoded_fmt_stream_map=");
+            char* url_encoded_fmt_stream_map_start = strstr(response_buffer->buffer, "url_encoded_fmt_stream_map=");
             char* url_encoded_fmt_stream_map_end = url_encoded_fmt_stream_map_start;
             while((*url_encoded_fmt_stream_map_end) != '&' && (*url_encoded_fmt_stream_map_end) != 0)
             {
@@ -84,6 +96,7 @@ unsigned int get_urls(char* clip_url, char** title_ret, char* video_request_urls
                                                  url_encoded_fmt_stream_map_end-url_encoded_fmt_stream_map_start-strlen("url_encoded_fmt_stream_map="),
                                                  &curl_easy_unescape_out);
         }
+		delete response_buffer;
 
         {// 3. Find video information from stream_map
             char* video_item = strtok(curl_stream_map, ",");
@@ -151,7 +164,6 @@ unsigned int get_urls(char* clip_url, char** title_ret, char* video_request_urls
             curl_free(curl_video_item_list[i]);
         }
         curl_free(curl_stream_map);
-        //curl_free(curl_title);
 
         curl_easy_cleanup(curl);
         curl_global_cleanup();
@@ -241,12 +253,14 @@ int main(int argc, char* argv[])
         return -1;
     }
     char* video_request_urls[MAX_VIDEO_ITEMS] = {0};
-    char* title = 0;
-    unsigned int ret = get_urls(argv[1], &title, video_request_urls, MAX_VIDEO_ITEMS);
+    char title[MAX_TITLE_LENGTH] = {0};
+    unsigned int ret = get_urls(argv[1], title, MAX_TITLE_LENGTH, video_request_urls, MAX_VIDEO_ITEMS);
+    printf("Got clip download urls\n");
     printf("Title: %s\n", title);
     for(unsigned int i = 0 ; i <ret ; i++)
     {
         unsigned char type = get_clip_format(video_request_urls[i]);
+	    printf("Got clip type\n");
         switch(type)
         {
         case YT_CLIP_TYPE_UNKNOWN:
@@ -256,12 +270,10 @@ int main(int argc, char* argv[])
             {
                 char file_ext[128] = {0};
                 sprintf(file_ext, "%s.webm", title);
+                printf("Start downloading %s.\n", file_ext);
+				printf("URL >> %s\n", video_request_urls[i]);
                 download(video_request_urls[i], file_ext);
-                printf("%s Done.\n", file_ext);
-                if(title)
-                {
-                    curl_free(title);
-                }
+                printf("Downloading is completed.\n");
                 return 0;
             }
             break;
@@ -270,12 +282,10 @@ int main(int argc, char* argv[])
             {
                 char file_ext[128] = {0};
                 sprintf(file_ext, "%s.mp4", title);
+                printf("Start downloading %s.\n", file_ext);
+				printf("URL >> %s\n", video_request_urls[i]);
                 download(video_request_urls[i], file_ext);
-                printf("%s Done.\n", file_ext);
-                if(title)
-                {
-                    curl_free(title);
-                }
+                printf("Downloading is completed.\n");
                 return 0;
             }
             break;
@@ -284,12 +294,10 @@ int main(int argc, char* argv[])
             {
                 char file_ext[128] = {0};
                 sprintf(file_ext, "%s.3gpp", title);
+                printf("Start downloading %s.\n", file_ext);
+				printf("URL >> %s\n", video_request_urls[i]);
                 download(video_request_urls[i], file_ext);
-                printf("%s Done.\n", file_ext);
-                if(title)
-                {
-                    curl_free(title);
-                }
+                printf("Downloading is completed.\n");
                 return 0;
             }
             break;
@@ -298,20 +306,14 @@ int main(int argc, char* argv[])
             {
                 char file_ext[128] = {0};
                 sprintf(file_ext, "%s.flv", title);
+                printf("Start downloading %s.\n", file_ext);
+				printf("URL >> %s\n", video_request_urls[i]);
                 download(video_request_urls[i], file_ext);
-                printf("%s Done.\n", file_ext);
-                if(title)
-                {
-                    curl_free(title);
-                }
+                printf("Downloading is completed.\n");
                 return 0;
             }
             break;
         }
-    }
-    if(title)
-    {
-        curl_free(title);
     }
     return 0;
 }
