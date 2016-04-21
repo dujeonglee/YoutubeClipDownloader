@@ -21,8 +21,8 @@ clean :
 
 debug : CPPFLAGS := -g -c -Wall -Werror
 debug : $(TARGET)
-	./ytdl https://www.youtube.com/watch?v=rn-wj4pRpIE mp4
+	./ytdl https://www.youtube.com/watch?v=rn-wj4pRpIE mp4 out
 
 release : CPPFLAGS := -O0 -c -Wall -Werror
 release : $(TARGET)
-	./ytdl https://www.youtube.com/watch?v=rn-wj4pRpIE mp4
+	./ytdl https://www.youtube.com/watch?v=rn-wj4pRpIE mp4 out
