@@ -79,7 +79,7 @@ unsigned int get_urls(char* clip_url, char* title, unsigned int title_size, char
             curl_title = curl_easy_unescape(curl, title_start+strlen("title="), title_end-title_start-strlen("title="), &curl_easy_unescape_out);
 			actual_title_length = strlen(curl_title);
 			memset(title, 0x0, title_size);
-            strncpy(title, curl_title, (actual_title_length < size-1?actual_title_length:size-1));
+            strncpy(title, curl_title, (actual_title_length < title_size-1?actual_title_length:title_size-1));
 			curl_free(curl_title);
         }
 
