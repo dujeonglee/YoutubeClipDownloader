@@ -16,402 +16,300 @@
 
 #define MY_DBG			printf("%s: %u\n", __func__, __LINE__)
 
-struct ResponseHeaderBuffer
-{
-    char buffer[MAX_RESPONSE_HEADER_SIZE];
-    unsigned int header_size;
-};
+#define UNUSED(x)            x=x
 
-struct ResponseDataBuffer
+unsigned int bytes_written;
+
+struct ResponseBuffer
 {
     char buffer[MAX_RESPONSE_DATA_SIZE];
-    unsigned int payload_size;
+    unsigned int total_size;
+    char* header;
+    char* payload;
 };
 
-static size_t write_payload(char *buffer, size_t size, size_t nitems, void *userdata)
+static size_t write_to_buffer(char *buffer, size_t size, size_t nitems, void *userdata)
 {
-    ResponseDataBuffer* const r_buff = (ResponseDataBuffer*)userdata;
-    if(r_buff->payload_size + size*nitems < MAX_RESPONSE_DATA_SIZE)
+    if(((struct ResponseBuffer*)userdata)->total_size + size*nitems < MAX_RESPONSE_DATA_SIZE)
     {
-        memcpy(r_buff->buffer+r_buff->payload_size, buffer, size*nitems);
-        r_buff->payload_size += size * nitems;
+        memcpy(((struct ResponseBuffer*)userdata)->buffer+((struct ResponseBuffer*)userdata)->total_size, buffer, size*nitems);
+        ((struct ResponseBuffer*)userdata)->total_size += size * nitems;
     }
     return size*nitems;
 }
 
-unsigned int total_size = 0;
-static size_t write_header(char *buffer, size_t size, size_t nitems, void *userdata)
+static size_t write_to_file(char *buffer, size_t size, size_t nitems, void *userdata)
 {
-    for(unsigned int i = 0 ; i < size*nitems ; i++)
+    bytes_written += size*nitems;
+    printf("\rReceived : %u", bytes_written);
+    fflush(stdout);
+    return fwrite(buffer, size, nitems, (FILE*)userdata);
+}
+
+
+CURL *curl = NULL;
+bool my_curl_init()
+{
+    if(curl)
     {
-        ((struct ResponseHeaderBuffer*)userdata)->buffer[((struct ResponseHeaderBuffer*)userdata)->header_size++] = buffer[i];
-        if(buffer[i] == '\n')
-        {
-            if(strstr(((struct ResponseHeaderBuffer*)userdata)->buffer, "Content-Length:") != NULL)
-            {
-                sscanf(((struct ResponseHeaderBuffer*)userdata)->buffer, "Content-Length: %u", &total_size);
-            }
-            memset(((struct ResponseHeaderBuffer*)userdata)->buffer, 0x0, MAX_RESPONSE_HEADER_SIZE);
-            ((struct ResponseHeaderBuffer*)userdata)->header_size = 0;
-        }
+        return true;
     }
-    return size*nitems;
-}
-
-unsigned int dl_size = 0;
-static size_t fwrite_payload(char *buffer, size_t size, size_t nitems, void *userdata)
-{
-        dl_size  = dl_size + (size*nitems);
-        printf("\r");
-        printf("[%3u%%]<", dl_size*100 / total_size);
-        for(unsigned int i = 0 ; i < dl_size*50 / total_size ; i++)
-        {
-            printf("=");
-        }
-        for(unsigned int i = 0 ; i < 50 - dl_size*50 / total_size ; i++)
-        {
-            printf("-");
-        }
-        printf(">");
-        fflush(stdout);
-        return fwrite(buffer, size, nitems, (FILE*)userdata);
-}
-
-unsigned int get_url_with_format(const char* clip_url, char* video_request_url, unsigned int video_request_url_length, unsigned char format)
-{
-    CURL *curl;
-    CURLcode res;
-
-    curl_global_init(CURL_GLOBAL_ALL);
+    if(curl_global_init(CURL_GLOBAL_ALL) != 0)
+    {
+        return false;
+    }
     curl = curl_easy_init();
-    if(curl) {
-        struct ResponseDataBuffer* response_buffer;
-        char clip_id[32] = {0};
-        char video_info_query[512] = {0};
-        char* curl_stream_map = 0;
-        char* curl_video_item = 0;
-
-        {// 0. Request video information
-            response_buffer = (struct ResponseDataBuffer*)malloc(sizeof(struct ResponseDataBuffer));
-            if(response_buffer == 0)
-            {
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-
-            sscanf(clip_url, "https://www.youtube.com/watch?v=%s", clip_id);
-            sprintf(video_info_query, "https://www.youtube.com/get_video_info?video_id=%s", clip_id);
-            curl_easy_setopt(curl, CURLOPT_URL, video_info_query);
-            memset(response_buffer->buffer, 0x0, MAX_RESPONSE_DATA_SIZE);
-            response_buffer->payload_size = 0;
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response_buffer);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_payload);
-            res = curl_easy_perform(curl);
-            if(res != CURLE_OK){
-                fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-        }
-
-        {// 1. Find url_encoded_fmt_stream_map from the response
-            char* url_encoded_fmt_stream_map_start = strstr(response_buffer->buffer, "url_encoded_fmt_stream_map=");
-            if(url_encoded_fmt_stream_map_start == NULL)
-            {
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-            char* url_encoded_fmt_stream_map_end = strchr(url_encoded_fmt_stream_map_start+1, '&');
-            if(url_encoded_fmt_stream_map_end == NULL) // This is a case where url_encoded_fmt_stream_map is the last element
-            {
-                url_encoded_fmt_stream_map_end = strchr(url_encoded_fmt_stream_map_start+1, 0);
-            }
-            if(url_encoded_fmt_stream_map_end == NULL)
-            {
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-            int curl_easy_unescape_out;
-            curl_stream_map = curl_easy_unescape(curl,
-                                                 url_encoded_fmt_stream_map_start+strlen("url_encoded_fmt_stream_map="),
-                                                 url_encoded_fmt_stream_map_end-url_encoded_fmt_stream_map_start-strlen("url_encoded_fmt_stream_map="),
-                                                 &curl_easy_unescape_out);
-            if(curl_stream_map == NULL)
-            {
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-        }
-        free(response_buffer);
-
-        {// 2. Find video information from stream_map
-            char* video_item_start = curl_stream_map;
-            char* video_item_end = strchr(video_item_start+1, ',');
-            if(video_item_end == NULL)
-            {
-                video_item_end = strchr(video_item_start+1, 0);
-            }
-            if(video_item_end == NULL)
-            {
-                curl_free(curl_stream_map);
-                curl_stream_map = 0;
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-            video_item_start = video_item_start-1; // Trick...for curl_video_item = curl_easy_unescape(curl, video_item_start+1, video_item_end - video_item_start-1, &curl_easy_unescape_out);
-            while(video_item_start)
-            {
-                int curl_easy_unescape_out;
-                curl_video_item = curl_easy_unescape(curl, video_item_start+1, video_item_end - video_item_start-1, &curl_easy_unescape_out);
-                if(curl_video_item == NULL)
-                {
-                    curl_free(curl_stream_map);
-                    curl_stream_map = 0;
-                    curl_easy_cleanup(curl);
-                    curl = 0;
-                    curl_global_cleanup();
-                    return 0;
-                }
-                switch(format)
-                {
-                case YT_CLIP_TYPE_WEBM:
-                    if(strstr(curl_video_item, "type=video/webm") != NULL)
-                    {
-                        goto match_found;
-                    }
-                    break;
-                case YT_CLIP_TYPE_MP4:
-                    if(strstr(curl_video_item, "type=video/mp4") != NULL)
-                    {
-                        goto match_found;
-                    }
-                    break;
-                case YT_CLIP_TYPE_3GPP:
-                    if(strstr(curl_video_item, "type=video/3gpp") != NULL)
-                    {
-                        goto match_found;
-                    }
-                    break;
-                case YT_CLIP_TYPE_FLV:
-                    if(strstr(curl_video_item, "type=video/x-flv") != NULL)
-                    {
-                        goto match_found;
-                    }
-                    break;
-                }
-                video_item_start = strchr(video_item_start+1, ',');
-                if(video_item_start == NULL)
-                {
-                    curl_free(curl_video_item);
-                    curl_video_item = 0;
-                    curl_free(curl_stream_map);
-                    curl_stream_map = 0;
-                    curl_easy_cleanup(curl);
-                    curl = 0;
-                    curl_global_cleanup();
-                    return 0;
-                }
-                video_item_end = strchr(video_item_start+1, ',');
-                if(video_item_end == NULL)
-                {
-                    video_item_end = strchr(video_item_start+1, 0);
-                }
-                if(video_item_end == NULL)
-                {
-                    curl_free(curl_video_item);
-                    curl_video_item = 0;
-                    curl_free(curl_stream_map);
-                    curl_stream_map = 0;
-                    curl_easy_cleanup(curl);
-                    curl = 0;
-                    curl_global_cleanup();
-                    return 0;
-                }
-                if(curl_video_item)
-                {
-                    curl_free(curl_video_item);
-                    curl_video_item = 0;
-                }
-            }
-            if(curl_video_item == NULL)
-            {
-                curl_free(curl_stream_map);
-                curl_stream_map = 0;
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-match_found:
-            curl_free(curl_stream_map);
-            curl_stream_map = 0;
-        }
-
-        {// 3. Generate request url with curl_video_item_list
-            if(strlen(curl_video_item) >= video_request_url_length)
-            {
-                curl_free(curl_video_item);
-                curl_video_item = 0;
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-            memset(video_request_url, 0x0, video_request_url_length);
-
-            char* url_start = strstr(curl_video_item, "url=");
-            if(url_start == NULL)
-            {
-                curl_free(curl_video_item);
-                curl_video_item = 0;
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-            strcpy(video_request_url, url_start+strlen("url="));
-            video_request_url[strlen(video_request_url)] = '&';
-            strncpy(video_request_url+strlen(video_request_url), curl_video_item, url_start - curl_video_item);
-            if(video_request_url[strlen(video_request_url)-1] == '&')
-            {
-                video_request_url[strlen(video_request_url)-1] = 0;
-            }
-        }
-        curl_free(curl_video_item);
-        printf("URL = %s\n", video_request_url);
-
-        {// 5. Remove duplicate itag field. (I don't know why itag field comes twice. Anyway itag should not appear more then once.)
-            //test
-            char* second_itag_start = strstr(video_request_url, "itag=");
-            if(second_itag_start == 0)
-            {
-                curl_easy_cleanup(curl);
-                curl = 0;
-                curl_global_cleanup();
-                return 0;
-            }
-            while((second_itag_start = strstr(second_itag_start+1, "&itag=")) != NULL)
-            {
-                char* second_itag_end = strchr(second_itag_start+1, '&');
-                if(second_itag_end == NULL)
-                {
-                    second_itag_end = strchr(second_itag_start+1, 0);
-                }
-                if(second_itag_end == NULL)
-                {
-                    curl_easy_cleanup(curl);
-                    curl = 0;
-                    curl_global_cleanup();
-                    return 0;
-                }
-                memmove(second_itag_start, second_itag_end, strlen(video_request_url) - (second_itag_end - second_itag_start));
-                second_itag_start = second_itag_start -1;
-            }
-        }
-        curl_easy_cleanup(curl);
-        curl = 0;
+    if(curl == NULL)
+    {
         curl_global_cleanup();
+        return false;
     }
-    return 1;
+    return true;
 }
 
-void download(char* url, char* filename_extenstion)
+void my_curl_cleanup()
 {
-    FILE* file;
-    CURL *curl;
-    CURLcode res;
-    struct ResponseHeaderBuffer buffer = {0};
-
-    curl_global_init(CURL_GLOBAL_ALL);
-    curl = curl_easy_init();
-    if(curl == 0)
+    if(curl == NULL)
     {
-        curl_global_cleanup();
         return;
-    }
-
-    file = fopen(filename_extenstion, "wb");
-    if(file == 0)
-    {
-        curl_easy_cleanup(curl);
-        curl_global_cleanup();
-        return;
-    }
-    if(file)
-    {
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)file);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite_payload);
-        curl_easy_setopt(curl, CURLOPT_HEADERDATA, (void*)&buffer);
-        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, write_header);
-        res = curl_easy_perform(curl);
-        if(res != CURLE_OK){
-            fclose(file);
-            curl_easy_cleanup(curl);
-            curl_global_cleanup();
-            return;
-        }
-        fclose(file);
-        printf("\n");
     }
     curl_easy_cleanup(curl);
     curl_global_cleanup();
-    return;
+    curl = NULL;
+}
+
+bool my_curl_request(char* url, struct ResponseBuffer* buff, bool include_hdr)
+{
+    if(curl == NULL)
+    {
+        return false;
+    }
+
+    memset(buff->buffer, 0x0, MAX_RESPONSE_DATA_SIZE);
+    buff->total_size = 0;
+    buff->header = NULL;
+    buff->payload = NULL;
+
+    if(curl_easy_setopt(curl, CURLOPT_URL, url) != CURLE_OK)
+    {
+        return false;
+    }
+    if(curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)buff))
+    {
+        return false;
+    }
+    if(curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_to_buffer))
+    {
+        return false;
+    }
+    if(include_hdr)
+    {
+        if(curl_easy_setopt(curl, CURLOPT_HEADERDATA, buff) != CURLE_OK)
+        {
+            return false;
+        }
+        if(curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, write_to_buffer) != CURLE_OK)
+        {
+            return false;
+        }
+    }
+    if(curl_easy_perform(curl) != CURLE_OK)
+    {
+        return false;
+    }
+    if(include_hdr)
+    {
+        buff->header = buff->buffer;
+        buff->payload = strstr(buff->buffer, "\r\n\r\n");
+        memset(buff->payload, 0x0, 4/*\r\n\r\n*/);
+        buff->payload += 4/*\r\n\r\n*/;
+    }
+    else
+    {
+        buff->header = NULL;
+        buff->payload = buff->buffer;
+    }
+    return true;
+}
+
+bool my_curl_request(char* url, char* filename, bool include_hdr)
+{
+    FILE* file;
+    if(curl == NULL)
+    {
+        return false;
+    }
+
+    file = fopen(filename, "wb");
+    if(file == NULL)
+    {
+        return false;
+    }
+    if(curl_easy_setopt(curl, CURLOPT_URL, url) != CURLE_OK)
+    {
+        fclose(file);
+        return false;
+    }
+    if(curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)file))
+    {
+        fclose(file);
+        return false;
+    }
+    if(curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_to_file))
+    {
+        fclose(file);
+        return false;
+    }
+    if(include_hdr)
+    {
+        if(curl_easy_setopt(curl, CURLOPT_HEADERDATA, file) != CURLE_OK)
+        {
+            fclose(file);
+            return false;
+        }
+        if(curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, write_to_file) != CURLE_OK)
+        {
+            fclose(file);
+            return false;
+        }
+    }
+    bytes_written = 0;
+    if(curl_easy_perform(curl) != CURLE_OK)
+    {
+        fclose(file);
+        return false;
+    }
+    fclose(file);
+    return true;
+}
+
+bool my_curl_find_value(const char* key, char* in, char* out, unsigned int out_size)
+{
+    memset(out, 0x0, out_size);
+    char* start = strstr(in, key);
+    char* end = strchr(start+1, '&');
+    if(end == 0)
+    {
+        end = strchr(start+1, 0);
+    }
+    if(end == NULL)
+    {
+        return false;
+    }
+    if((end - start)+1 > out_size)
+    {
+        return false;
+    }
+    strncpy(out, start+strlen(key), (end - start)-strlen(key));
+    return true;
+}
+
+bool my_curl_url_decoding(char* in, char* out, unsigned int out_size)
+{
+    int decoded_url_size;
+    memset(out, 0x0, out_size);
+    if(curl == NULL)
+    {
+        return false;
+    }
+    char* curl_decode = curl_easy_unescape(curl, in, strlen(in), &decoded_url_size);
+    if((unsigned int)decoded_url_size > out_size)
+    {
+        curl_free(curl_decode);
+        return false;
+    }
+    strcpy(out, curl_decode);
+    curl_free(curl_decode);
+    return true;
 }
 
 int main(int argc, char* argv[])
 {
-    char video_request_url[MAX_URL_SIZE] = {0};
-    unsigned char format = YT_CLIP_TYPE_UNKNOWN;
-    char filename[MAX_FILENAME_SIZE] = {0};
-
     if(argc != 4)
     {
-        printf("Usage: %s url format{webm, mp4, 3gpp, flv} filename", argv[0]);
+        printf("Usage: %s url {webm, mp4, 3gpp, flv} filename\n", argv[0]);
         return -1;
     }
-    if(strcmp(argv[2], "webm") == 0)
+    if(my_curl_init() == false)
     {
-        format = YT_CLIP_TYPE_WEBM;
+        return -1;
     }
-    else if(strcmp(argv[2], "mp4") == 0)
+
+    char video_id[16] = {0,};
+    char query[64] = {0,};
+    struct ResponseBuffer response;
+    char stream_map[1024*64] = {0,};
+    char decoded_stream_map[1024*64] = {0,};
+    char decoded_video[1024*32] = {0,};
+    char download_url[1024*32] = {0,};
+
+
+    sscanf(argv[1], "https://www.youtube.com/watch?v=%s", video_id);
+    sprintf(query, "https://www.youtube.com/get_video_info?video_id=%s", video_id);
+    if(my_curl_request(query, &response, false) == false)
     {
-        format = YT_CLIP_TYPE_MP4;
+        my_curl_cleanup();
+        return -1;
     }
-    else if(strcmp(argv[2], "3gpp") == 0)
+
+    if(my_curl_find_value("url_encoded_fmt_stream_map=", response.payload, stream_map, 1024*64) == false)
     {
-        format = YT_CLIP_TYPE_3GPP;
+        my_curl_cleanup();
+        return -1;
     }
-    else if(strcmp(argv[2], "flv") == 0)
+
+    if(my_curl_url_decoding(stream_map, decoded_stream_map, 1024*64) == false)
     {
-        format = YT_CLIP_TYPE_FLV;
+        my_curl_cleanup();
+        return -1;
+    }
+
+    char* video = strtok(decoded_stream_map, ",");
+    while(video != NULL)
+    {
+        if(my_curl_url_decoding(video, decoded_video, 1024*32) == true)
+        {
+            if(strstr(decoded_video, "signature=") != NULL && strstr(decoded_video, argv[2]) != NULL)
+            {
+                break;
+            }
+        }
+        video = strtok(NULL, ",");
+    }
+
+    if(video == NULL)
+    {
+        my_curl_cleanup();
+        printf("The requested content's signature is encrypted or the requested format %s is not supported\n", argv[2]);
+        return -1;
+    }
+
+    char* url_pos = strstr(decoded_video, "url=");
+    strcpy(download_url, url_pos+strlen("url="));
+    download_url[strlen(download_url)]='&';
+    strncpy(download_url+strlen(download_url), decoded_video, url_pos - decoded_video);
+    if(download_url[strlen(download_url)-1]=='&')
+    {
+        download_url[strlen(download_url)-1]=0;
+    }
+    char* itag_start = strstr(download_url, "itag=");
+    char* itag_end = strstr(itag_start+1, "&");
+    if(itag_end == NULL)
+    {
+        memset(itag_start, 0x0, strlen(itag_start));
     }
     else
     {
-        printf("Usage: %s url format{webm, mp4, 3gpp, flv}", argv[0]);
-        return -1;
+        memmove(itag_start, itag_end, strlen(itag_end));
     }
-    if(get_url_with_format(argv[1], video_request_url, MAX_URL_SIZE, format) == 0)
+    printf("start download %s\n", download_url);
+    if(my_curl_request(download_url, argv[3], false) == false)
     {
-        printf("Could not find a match\n");
+        printf("Could not download the content\n");
+        my_curl_cleanup();
         return -1;
     }
-    sprintf(filename ,"%s.%s", argv[3], (format == YT_CLIP_TYPE_WEBM?"wemb":(format == YT_CLIP_TYPE_MP4?"mp4":(format == YT_CLIP_TYPE_3GPP?"3gpp":"flv"))));
-    download(video_request_url, filename);
-    printf("Downloading is done.\n");
-    printf("Enjoy %s.\n", filename);
+    my_curl_cleanup();
     return 0;
 }
 
