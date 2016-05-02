@@ -196,7 +196,7 @@ bool my_curl_find_value(const char* key, char* in, char* out, unsigned int out_s
     {
         return false;
     }
-    if((end - start)+1 > out_size)
+    if((end - start)-strlen(key)+1 > out_size)
     {
         return false;
     }
@@ -238,6 +238,7 @@ int main(int argc, char* argv[])
     char video_id[16] = {0,};
     char query[64] = {0,};
     struct ResponseBuffer response;
+	char use_encoded_signature[10] = {0,};
     char stream_map[1024*64] = {0,};
     char decoded_stream_map[1024*64] = {0,};
     char decoded_video[1024*32] = {0,};
@@ -251,12 +252,24 @@ int main(int argc, char* argv[])
         my_curl_cleanup();
         return -1;
     }
+	printf("%s\n", response.payload);
 
+    if(my_curl_find_value("use_cipher_signature=", response.payload, use_encoded_signature, 10) == false)
+    {
+        my_curl_cleanup();
+        return -1;
+    }
     if(my_curl_find_value("url_encoded_fmt_stream_map=", response.payload, stream_map, 1024*64) == false)
     {
         my_curl_cleanup();
         return -1;
     }
+	if(strcmp(use_encoded_signature, "True") == 0)
+	{
+		printf("Encoded content\n");
+		my_curl_cleanup();
+		return -1;
+	}
 
     if(my_curl_url_decoding(stream_map, decoded_stream_map, 1024*64) == false)
     {
@@ -269,7 +282,7 @@ int main(int argc, char* argv[])
     {
         if(my_curl_url_decoding(video, decoded_video, 1024*32) == true)
         {
-            if(strstr(decoded_video, "signature=") != NULL && strstr(decoded_video, argv[2]) != NULL)
+            if(strstr(decoded_video, argv[2]) != NULL)
             {
                 break;
             }
@@ -280,7 +293,6 @@ int main(int argc, char* argv[])
     if(video == NULL)
     {
         my_curl_cleanup();
-        printf("The requested content's signature is encrypted or the requested format %s is not supported\n", argv[2]);
         return -1;
     }
 
@@ -301,8 +313,10 @@ int main(int argc, char* argv[])
     else
     {
         memmove(itag_start, itag_end, strlen(itag_end));
+        memset(download_url + strlen(download_url) - (itag_end - itag_start), 0x0, itag_end - itag_start);
     }
     printf("start download %s\n", download_url);
+	printf("%s\n", strstr(download_url, "&s="));
     if(my_curl_request(download_url, argv[3], false) == false)
     {
         printf("Could not download the content\n");
